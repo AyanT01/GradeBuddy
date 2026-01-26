@@ -1,0 +1,24 @@
+# =============================================================================
+# GradeBuddy Terraform Variables Example
+# =============================================================================
+# Copy this file to terraform.tfvars and customize values as needed.
+# Database is hosted on Neon (free tier) - not managed by Terraform.
+# =============================================================================
+
+# AWS Region for all resources
+aws_region = "us-east-1"
+
+# Environment name (affects resource naming and configurations)
+environment = "dev"
+
+# Allowed CORS origins for S3 bucket
+# Add your frontend URL and Vercel deployment URLs here
+allowed_origins = [
+  "http://localhost:3000",
+  "http://localhost:3001",
+  "https://your-app.vercel.app"
+]
+
+# Number of days before uploaded files are automatically deleted
+# Set to 30 for dev, consider removing/increasing for production
+file_expiration_days = 30
