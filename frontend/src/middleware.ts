@@ -9,12 +9,12 @@ const isPublicRoute = createRouteMatcher([
   "/onboarding(.*)",
 ]);
 
-export default clerkMiddleware((auth, request) => {
+export default clerkMiddleware(async (auth, request) => {
   if (isPublicRoute(request)) {
     return;
   }
 
-  const { userId } = auth();
+  const { userId } = await auth();
   if (!userId) {
     const signInUrl = new URL("/sign-in", request.url);
     signInUrl.searchParams.set("redirect_url", request.url);
