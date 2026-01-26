@@ -40,9 +40,21 @@ origins = os.getenv(
 )
 origin_list = [origin.strip() for origin in origins.split(",") if origin.strip()]
 
+# For MVP: Allow all vercel.app subdomains
+def is_allowed_origin(origin: str) -> bool:
+    if not origin:
+        return False
+    if origin in origin_list:
+        return True
+    if origin.endswith(".vercel.app"):
+        return True
+    if "localhost" in origin:
+        return True
+    return False
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origin_list or ["*"],
+    allow_origins=["*"],  # Allow all for MVP (credentials still checked)
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
