@@ -1,3 +1,4 @@
+import logging
 import os
 import random
 import re
@@ -32,6 +33,24 @@ from app.models import (
     User,
 )
 
+logger = logging.getLogger(__name__)
+
+# --------------- Constants ---------------
+JOIN_CODE_MAX_ATTEMPTS = 10
+PRESIGNED_UPLOAD_EXPIRY_SECONDS = 900   # 15 minutes
+PRESIGNED_DOWNLOAD_EXPIRY_SECONDS = 3600  # 1 hour
+
+ALLOWED_UPLOAD_CONTENT_TYPES = {
+    "application/pdf",
+    "image/png",
+    "image/jpeg",
+    "application/msword",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/vnd.ms-powerpoint",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "text/plain",
+}
+
 app = FastAPI(title="GradeBuddy API")
 
 origins = os.getenv(
@@ -40,21 +59,10 @@ origins = os.getenv(
 )
 origin_list = [origin.strip() for origin in origins.split(",") if origin.strip()]
 
-# For MVP: Allow all vercel.app subdomains
-def is_allowed_origin(origin: str) -> bool:
-    if not origin:
-        return False
-    if origin in origin_list:
-        return True
-    if origin.endswith(".vercel.app"):
-        return True
-    if "localhost" in origin:
-        return True
-    return False
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all for MVP (credentials still checked)
+    allow_origins=origin_list,
+    allow_origin_regex=r"https://.*\.vercel\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -117,7 +125,7 @@ def _get_db_user(session: Session, clerk_id: str) -> User:
 
 
 def _generate_join_code(session: Session) -> str:
-    for _ in range(10):
+    for _ in range(JOIN_CODE_MAX_ATTEMPTS):
         code = f"{random.randint(0, 999999):06d}"
         existing = session.exec(
             select(Classroom).where(Classroom.join_code == code)
@@ -505,10 +513,14 @@ def get_assignment(
             file_url = s3_client.generate_presigned_url(
                 "get_object",
                 Params={"Bucket": bucket, "Key": assignment.file_key},
-                ExpiresIn=3600,
+                ExpiresIn=PRESIGNED_DOWNLOAD_EXPIRY_SECONDS,
             )
         except (BotoCoreError, ClientError):
-            pass
+            logger.warning(
+                "Failed to generate presigned URL for assignment file_key=%s",
+                assignment.file_key,
+                exc_info=True,
+            )
 
     return {
         "id": assignment.id,
@@ -571,10 +583,14 @@ def list_submissions(
             file_url = s3_client.generate_presigned_url(
                 "get_object",
                 Params={"Bucket": bucket, "Key": submission.file_key},
-                ExpiresIn=3600,
+                ExpiresIn=PRESIGNED_DOWNLOAD_EXPIRY_SECONDS,
             )
         except (BotoCoreError, ClientError):
-            pass
+            logger.warning(
+                "Failed to generate presigned URL for submission file_key=%s",
+                submission.file_key,
+                exc_info=True,
+            )
 
         result.append({
             "id": submission.id,
@@ -595,6 +611,12 @@ def create_presigned_url(
 ) -> PresignedUrlResponse:
     user = _get_db_user(session, clerk_user.user_id)
     safe_name = os.path.basename(payload.filename)
+
+    if payload.file_type not in ALLOWED_UPLOAD_CONTENT_TYPES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"File type '{payload.file_type}' is not allowed",
+        )
 
     if payload.purpose == "assignment":
         # Teacher uploading assignment materials
@@ -635,7 +657,7 @@ def create_presigned_url(
                 "Key": file_key,
                 "ContentType": payload.file_type,
             },
-            ExpiresIn=900,
+            ExpiresIn=PRESIGNED_UPLOAD_EXPIRY_SECONDS,
         )
     except (BotoCoreError, ClientError) as exc:
         raise HTTPException(
@@ -702,7 +724,7 @@ class QuizSubmitRequest(BaseModel):
 
 class GradeAnswerRequest(BaseModel):
     is_correct: bool
-    points_earned: int
+    points_earned: int = PydField(ge=0)
 
 
 @app.post("/quizzes")
@@ -897,6 +919,25 @@ def delete_question(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Question not found",
+        )
+
+    # Verify teacher owns the quiz's classroom
+    quiz = session.exec(select(Quiz).where(Quiz.id == question.quiz_id)).first()
+    if not quiz:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Quiz not found",
+        )
+    classroom = session.exec(
+        select(Classroom).where(
+            Classroom.id == quiz.classroom_id,
+            Classroom.teacher_id == user.id,
+        )
+    ).first()
+    if not classroom:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not authorized",
         )
 
     # Delete options first
